@@ -1,17 +1,20 @@
 #! /bin/bash
-PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
+set -e
+set -o pipefail
+umask 077
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 #===============================================================================================
-#   System Required:  CentOS6.x/7 (32bit/64bit) or Ubuntu
-#   Description:  Install IKEV2 VPN for CentOS and Ubuntu
+#   System Required:  Debian 12+ or RHEL-compatible Linux 8+
+#   Description:  Install IKEv2 VPN
 #   Author: quericy
 #   Intro:  https://quericy.me/blog/699
 #===============================================================================================
 
-clear
+[ ! -t 1 ] || clear
 VER=1.2.0
 echo "#############################################################"
-echo "# Install IKEV2 VPN for CentOS6.x/7 (32bit/64bit) or Ubuntu or Debian7/8.*"
+echo "# Install IKEv2 VPN for Debian 12+ or RHEL-compatible Linux 8+"
 echo "# Intro: https://quericy.me/blog/699"
 echo "#"
 echo "# Author:quericy"
@@ -58,9 +61,8 @@ __yellow(){
 # Install IKEV2
 function install_ikev2(){
     rootness
-    disable_selinux
     get_system
-    yum_install
+    install_build_dependencies
     get_my_ip
     pre_install
     download_files
@@ -71,7 +73,13 @@ function install_ikev2(){
     configure_secrets
     SNAT_set
     iptables_check
-    ipsec restart
+    if command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        systemctl enable strongswan-starter.service
+        systemctl restart strongswan-starter.service
+    else
+        ipsec restart
+    fi
     success_info
 }
 
@@ -83,54 +91,61 @@ if [[ $EUID -ne 0 ]]; then
 fi
 }
 
-# Disable selinux
-function disable_selinux(){
-if [ -s /etc/selinux/config ] && grep 'SELINUX=enforcing' /etc/selinux/config; then
-    sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
-    setenforce 0
-fi
+function detect_system(){
+    local system_id=$1 system_like=$2 system_version=$3 major
+    major=${system_version%%.*}
+    if [[ ! "$major" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    case "$system_id" in
+        debian)
+            (( 10#$major >= 12 )) || return 1
+            system_str="1"
+            ;;
+        *)
+            case " $system_id $system_like " in
+                *" rhel "*|*" centos "*|*" rocky "*|*" almalinux "*|*" ol "*) ;;
+                *) return 1 ;;
+            esac
+            (( 10#$major >= 8 )) || return 1
+            system_str="0"
+            ;;
+    esac
 }
 
-# Ubuntu or CentOS
 function get_system(){
-    if grep -Eqi "CentOS" /etc/issue || grep -Eq "CentOS" /etc/*-release; then
-        system_str="0"
-    elif  grep -Eqi "Ubuntu" /etc/issue || grep -Eq "Ubuntu" /etc/*-release; then
-        system_str="1"
-    elif  grep -Eqi "Debian" /etc/issue || grep -Eq "Debian" /etc/*-release; then
-        system_str="1"
-    elif  grep -Eqi "Raspbian" /etc/issue || grep -Eq "Raspbian" /etc/*-release; then
-        system_str="1"
-    else
-        echo "This Script must be running at the CentOS or Ubuntu or Debian!"
+    local ID= ID_LIKE= VERSION_ID=
+    if [ ! -r /etc/os-release ]; then
+        echo "Cannot identify this operating system (/etc/os-release missing)." >&2
+        exit 1
+    fi
+    . /etc/os-release
+    if ! detect_system "$ID" "$ID_LIKE" "$VERSION_ID"; then
+        echo "Unsupported operating system: ${ID:-unknown} ${VERSION_ID:-unknown}. Requires Debian 12+ or RHEL-compatible Linux 8+." >&2
         exit 1
     fi
 }
 
 #install necessary lib
-function yum_install(){
+function install_build_dependencies(){
     if [ "$system_str" = "0" ]; then
-    yum -y update
-    yum -y install pam-devel openssl-devel make gcc curl
+    dnf -y install pam-devel openssl-devel make gcc /usr/bin/curl tar openssl iproute iptables ca-certificates pkgconfig
     else
     apt-get -y update
-    apt-get -y install libpam0g-dev libssl-dev make gcc curl
+    apt-get -y install libpam0g-dev libssl-dev make gcc curl tar openssl iproute2 iptables ca-certificates pkg-config
     fi
 }
 
 # Get IP address of the server
 function get_my_ip(){
     echo "Preparing, Please wait a moment..."
-    IP=`curl -s checkip.dyndns.com | cut -d' ' -f 6  | cut -d'<' -f 1`
-    if [ -z $IP ]; then
-        IP=`curl -s ifconfig.me/ip`
-    fi
+    IP=$(curl -4fsS --max-time 10 https://api.ipify.org || true)
 }
 
 # Pre-installation settings
 function pre_install(){
     echo "#############################################################"
-    echo "# Install IKEV2 VPN for CentOS6.x/7 (32bit/64bit) or Ubuntu or Debian7/8.*"
+    echo "# Install IKEv2 VPN for Debian 12+ or RHEL-compatible Linux 8+"
     echo "# Intro: https://quericy.me/blog/699"
     echo "#"
     echo "# Author:quericy"
@@ -156,6 +171,14 @@ function pre_install(){
     if [ "$vps_ip" = "" ]; then
         vps_ip=$IP
     fi
+    if [ -z "$vps_ip" ]; then
+        echo "A server IP address or domain is required." >&2
+        exit 1
+    fi
+    if [[ ! "$vps_ip" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]; then
+        echo "Enter an IPv4 address or a domain name without wildcards." >&2
+        exit 1
+    fi
 
     echo "Would you want to import existing cert? You NEED copy your cert file to the same directory of this script"
     read -p "yes or no?(default_value:no):" have_cert
@@ -164,9 +187,9 @@ function pre_install(){
     else
         have_cert="0"
         echo "please input the cert country(C):"
-        read -p "C(default value:com):" my_cert_c
+        read -p "C(default value:US):" my_cert_c
         if [ "$my_cert_c" = "" ]; then
-            my_cert_c="com"
+            my_cert_c="US"
         fi
         echo "please input the cert organization(O):"
         read -p "O(default value:myvpn):" my_cert_o
@@ -208,25 +231,26 @@ function pre_install(){
     char=`get_char`
     #Current folder
     cur_dir=`pwd`
-    cd $cur_dir
+    cd "$cur_dir"
 }
 
 
 # Download strongswan
 function download_files(){
-    strongswan_version='strongswan-5.9.0'
+    strongswan_version='strongswan-6.1.0'
     strongswan_file="$strongswan_version.tar.gz"
-    if [ -f $strongswan_file ];then
+    if [ -f "$strongswan_file" ];then
         echo -e "$strongswan_file [$(__green "found")]"
     else
-        if ! wget --no-check-certificate https://download.strongswan.org/$strongswan_file;then
+        if ! curl --fail --location --output "$strongswan_file.tmp" "https://download.strongswan.org/$strongswan_file";then
             echo "Failed to download $strongswan_file"
             exit 1
         fi
+        mv "$strongswan_file.tmp" "$strongswan_file"
     fi
-    tar xzf $strongswan_file
+    tar xzf "$strongswan_file"
     if [ $? -eq 0 ];then
-        cd $cur_dir/$strongswan_version/
+        cd "$cur_dir/$strongswan_version/"
     else
         echo ""
         echo "Unzip $strongswan_file failed! Please visit https://quericy.me/blog/699 and contact."
@@ -237,26 +261,26 @@ function download_files(){
 # configure and install strongswan
 function setup_strongswan(){
     if [ "$os" = "1" ]; then
-        ./configure  --enable-eap-identity --enable-eap-md5 \
+        ./configure --with-systemdsystemunitdir=/etc/systemd/system --enable-eap-identity --enable-eap-md5 \
 --enable-eap-mschapv2 --enable-eap-tls --enable-eap-ttls --enable-eap-peap  \
 --enable-eap-tnc --enable-eap-dynamic --enable-eap-radius --enable-xauth-eap  \
 --enable-xauth-pam  --enable-dhcp  --enable-openssl  --enable-addrblock --enable-unity  \
---enable-certexpire --enable-radattr --enable-swanctl --enable-openssl --disable-gmp
+--enable-certexpire --enable-radattr --enable-swanctl --enable-stroke --enable-ikev1 --enable-md4 --enable-des --disable-gmp || return 1
 
     else
-        ./configure  --enable-eap-identity --enable-eap-md5 \
+        ./configure --with-systemdsystemunitdir=/etc/systemd/system --enable-eap-identity --enable-eap-md5 \
 --enable-eap-mschapv2 --enable-eap-tls --enable-eap-ttls --enable-eap-peap  \
 --enable-eap-tnc --enable-eap-dynamic --enable-eap-radius --enable-xauth-eap  \
 --enable-xauth-pam  --enable-dhcp  --enable-openssl  --enable-addrblock --enable-unity  \
---enable-certexpire --enable-radattr --enable-swanctl --enable-openssl --disable-gmp --enable-kernel-libipsec
+--enable-certexpire --enable-radattr --enable-swanctl --enable-stroke --enable-ikev1 --enable-md4 --enable-des --disable-gmp --enable-kernel-libipsec || return 1
 
     fi
-    make; make install
+    make && make install
 }
 
 # configure cert and key
 function get_key(){
-    cd $cur_dir
+    cd "$cur_dir"
     if [ ! -d my_key ];then
         mkdir my_key
     fi
@@ -286,13 +310,13 @@ function get_key(){
 
 # import cert if user has ssl certificate
 function import_cert(){
-   cd $cur_dir
+    cd "$cur_dir"
    if [ -f ca.cert.pem ];then
         cp -f ca.cert.pem my_key/ca.cert.pem
         echo -e "ca.cert.pem [$(__green "found")]"
     else
         echo -e "ca.cert.pem [$(__red "Not found!")]"
-        exit
+        exit 1
     fi
     if [ -f server.cert.pem ];then
         cp -f server.cert.pem my_key/server.cert.pem
@@ -300,16 +324,8 @@ function import_cert(){
         echo -e "server.cert.pem [$(__green "found")]"
         echo -e "client.cert.pem [$(__green "auto create")]"
     else
-        echo -e "server.cert.pem [$(__red "Not found!,auto creating...")]"
-        ipsec pki --gen --outform pem > server.pem
-        ipsec pki --pub --in server.pem | ipsec pki --issue --cacert ca.cert.pem \
-        --cakey ca.pem --dn "C=${my_cert_c}, O=${my_cert_o}, CN=${vps_ip}" \
-        --san="${vps_ip}" --flag serverAuth --flag ikeIntermediate \
-        --outform pem > server.cert.pem
-        cp -f server.cert.pem my_key/server.cert.pem
-        cp -f server.cert.pem my_key/client.cert.pem
-        echo -e "server.cert.pem [$(__green "created")]"
-        echo -e "client.cert.pem [$(__green "auto create")]"
+        echo -e "server.cert.pem [$(__red "Not found!")]"
+        exit 1
     fi
     if [ -f server.pem ];then
         cp -f server.pem my_key/server.pem
@@ -318,14 +334,14 @@ function import_cert(){
         echo -e "client.pem [$(__green "auto create")]"
     else
         echo -e "server.pem [$(__red "Not found!")]"
-        exit
+        exit 1
     fi
     cd my_key
 }
 
 # auto create certificate
 function create_cert(){
-    cd $cur_dir
+    cd "$cur_dir"
     cd my_key
     ipsec pki --gen --outform pem > ca.pem
     ipsec pki --self --in ca.pem --dn "C=${my_cert_c}, O=${my_cert_o}, CN=${my_cert_cn}" --ca --outform pem >ca.cert.pem
@@ -385,8 +401,6 @@ conn networkmanager-strongswan
 
 conn ios_ikev2
     keyexchange=ikev2
-    ike=aes256-sha256-modp2048,3des-sha1-modp2048,aes256-sha1-modp2048!
-    esp=aes256-sha256,3des-sha1,aes256-sha1!
     rekey=no
     left=%defaultroute
     leftid=${vps_ip}
@@ -402,26 +416,21 @@ conn ios_ikev2
     fragmentation=yes
     auto=add
 
-conn windows7
-    keyexchange=ikev2
-    ike=aes256-sha1-modp1024!
-    rekey=no
-    left=%defaultroute
-    leftauth=pubkey
-    leftsubnet=0.0.0.0/0
-    leftcert=server.cert.pem
-    right=%any
-    rightauth=eap-mschapv2
-    rightsourceip=10.31.2.0/24
-    rightsendcert=never
-    eap_identity=%any
-    auto=add
-
 EOF
 }
 
 # configure the strongswan.conf
 function configure_strongswan(){
+ if [ "$os" = "2" ]; then
+    kernel_libipsec_load=10
+ else
+    kernel_libipsec_load=no
+ fi
+ cat > /usr/local/etc/strongswan.d/charon/kernel-libipsec.conf<<-EOF
+kernel-libipsec {
+    load = ${kernel_libipsec_load}
+}
+EOF
  cat > /usr/local/etc/strongswan.conf<<-EOF
  charon {
         load_modular = yes
@@ -431,11 +440,10 @@ function configure_strongswan(){
         compress = yes
         plugins {
                 include strongswan.d/charon/*.conf
+            attr {
+                dns = 8.8.8.8, 8.8.4.4
+            }
         }
-        dns1 = 8.8.8.8
-        dns2 = 8.8.4.4
-        nbns1 = 8.8.8.8
-        nbns2 = 8.8.4.4
 }
 include strongswan.d/*.conf
 EOF
@@ -443,12 +451,16 @@ EOF
 
 # configure the ipsec.secrets
 function configure_secrets(){
+    vpn_password=$(openssl rand -hex 16)
+    vpn_psk=$(openssl rand -hex 24)
+    vpn_xauth_password=$(openssl rand -hex 16)
     cat > /usr/local/etc/ipsec.secrets<<-EOF
-: RSA server.pem
-: PSK "myPSKkey"
-: XAUTH "myXAUTHPass"
-myUserName %any : EAP "myUserPass"
+: PKCS8 server.pem
+: PSK "${vpn_psk}"
+: XAUTH "${vpn_xauth_password}"
+myUserName %any : EAP "${vpn_password}"
 EOF
+    chmod 600 /usr/local/etc/ipsec.secrets
 }
 
 function SNAT_set(){
@@ -501,10 +513,12 @@ function iptables_set(){
     ip address | grep inet
     echo "The above content is the network card information of your VPS."
     echo "[$(__yellow "Important")]Please enter the name of the interface which can be connected to the public network."
+    default_interface=$(ip -4 route show default | awk 'NR == 1 {for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
     if [ "$os" = "1" ]; then
-            read -p "Network card interface(default_value:eth0):" interface
+            default_interface=${default_interface:-eth0}
+            read -p "Network card interface(default_value:${default_interface}):" interface
         if [ "$interface" = "" ]; then
-            interface="eth0"
+            interface="$default_interface"
         fi
         iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
         iptables -A FORWARD -s 10.31.0.0/24  -j ACCEPT
@@ -527,9 +541,10 @@ function iptables_set(){
             iptables -t nat -A POSTROUTING -s 10.31.2.0/24 -o $interface -j MASQUERADE
         fi
     else
-        read -p "Network card interface(default_value:venet0):" interface
+        default_interface=${default_interface:-venet0}
+        read -p "Network card interface(default_value:${default_interface}):" interface
         if [ "$interface" = "" ]; then
-            interface="venet0"
+            interface="$default_interface"
         fi
         iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
         iptables -A FORWARD -s 10.31.0.0/24  -j ACCEPT
@@ -552,15 +567,33 @@ function iptables_set(){
             iptables -t nat -A POSTROUTING -s 10.31.2.0/24 -o $interface -j MASQUERADE
         fi
     fi
-    if [ "$system_str" = "0" ]; then
-        service iptables save
-    else
-        iptables-save > /etc/iptables.rules
+    iptables-save > /etc/iptables.rules
+    if command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+        cat > /etc/systemd/system/ikev2-iptables.service<<-EOF
+[Unit]
+Description=Restore IKEv2 iptables rules
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'iptables-restore < /etc/iptables.rules'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable ikev2-iptables.service
+    elif [ -d /etc/network/if-up.d ]; then
         cat > /etc/network/if-up.d/iptables<<-EOF
 #!/bin/sh
 iptables-restore < /etc/iptables.rules
 EOF
         chmod +x /etc/network/if-up.d/iptables
+    else
+        echo "Could not configure automatic iptables restoration; restore /etc/iptables.rules at boot." >&2
     fi
 }
 
@@ -572,8 +605,9 @@ function success_info(){
     echo -e "# Version:$VER"
     echo -e "# There is the default login info of your IPSec/IkeV2 VPN Service"
     echo -e "# UserName:$(__green " myUserName")"
-    echo -e "# PassWord:$(__green " myUserPass")"
-    echo -e "# PSK:$(__green " myPSKkey")"
+    echo -e "# PassWord:$(__green " ${vpn_password}")"
+    echo -e "# XAUTH PassWord:$(__green " ${vpn_xauth_password}")"
+    echo -e "# PSK:$(__green " ${vpn_psk}")"
     echo -e "# you should change default username and password in$(__green " /usr/local/etc/ipsec.secrets")"
     echo -e "# you cert:$(__green " ${cur_dir}/my_key/ca.cert.pem ")"
     if [ "$have_cert" = "1" ]; then
@@ -586,5 +620,6 @@ function success_info(){
     echo -e ""
 }
 
-# Initialization step
-install_ikev2
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    install_ikev2
+fi
