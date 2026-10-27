@@ -1,4 +1,4 @@
-# 一键搭建适用于Ubuntu/CentOS的IKEV2/L2TP的VPN
+# 一键搭建 IKEv2 VPN
 
 ------
 [![Author](https://img.shields.io/badge/author-%40quericy-blue.svg)](https://quericy.me)   [![Platform](https://img.shields.io/badge/Platform-%20Ubuntu%2CCentOS%20-green.svg)]()  [![GitHub stars](https://img.shields.io/github/stars/quericy/one-key-ikev2-vpn.svg)](https://github.com/quericy/one-key-ikev2-vpn/stargazers)  [![GitHub license](https://img.shields.io/badge/license-GPLv3-yellowgreen.svg)](https://raw.githubusercontent.com/quericy/one-key-ikev2-vpn/master/LICENSE)
@@ -7,7 +7,7 @@
 
 特性
 =============
-> * 服务端要求：Ubuntu或者CentOS-6/7或者Debian
+> * 服务端：基于 systemd 的 Debian 12+ 或 RHEL 8+ 兼容系统（如 Rocky Linux、AlmaLinux），需 root 权限；不支持 Ubuntu 和 Fedora
 > * 客户端：
  - iOS/OSX=>ikev1,ikev2
  - Andriod=>ikev1
@@ -15,9 +15,12 @@
  - 其他Windows平台=>ikev2
 > * 可使用自己的私钥和根证书，也可自动生成
 > * 证书可绑定域名或ip
-> * 要是图方便可一路回车
+> * 编译安装 strongSwan 6.1.0，使用兼容的传统 ipsec.conf/stroke 配置
+> * 安装时生成随机登录密码和预共享密钥
 
-最近更新
+**注意**：脚本会覆盖 `/usr/local/etc/ipsec.conf`、`strongswan.conf` 和 `ipsec.secrets`，修改 IPv4 转发和防火墙规则。重复运行会重新生成凭据及自签名证书，请事先备份现有配置和私钥。脚本不会关闭 SELinux；启用 SELinux 的系统可能需要自行配置策略。IKEv1 已被 strongSwan 弃用，建议使用 IKEv2。脚本不提供 L2TP 服务。
+
+历史更新
 ==========
 > - 添加SSL证书自动申请自动更新并应用于IKEv2的解决方案,详见这篇博文:[SSL证书自动更新并应用到IKEv2, Nginx](https://quericy.me/blog/860/) ;
 > - 添加对CentOS7的firewall防火墙的支持;
@@ -30,7 +33,7 @@
 ==========
 1. 下载脚本:
     ```shell
-    wget --no-check-certificate https://raw.githubusercontent.com/quericy/one-key-ikev2-vpn/master/one-key-ikev2.sh
+    curl -fLO https://raw.githubusercontent.com/quericy/one-key-ikev2-vpn/master/one-key-ikev2.sh
     ```
     * 注:如需使用其他分支的脚本,请将上述url中的master修改为分支名称,各分支区别详见本页的[分支说明](#分支说明)节点
 
@@ -40,7 +43,7 @@
     bash one-key-ikev2.sh
     ```
 
-3. 等待自动配置部分内容后，选择vps类型（OpenVZ还是Xen、KVM），**选错将无法成功连接，请务必核实服务器的类型**。输入服务器ip或者绑定的域名(连接vpn时服务器地址将需要与此保持一致,如果是导入泛域名证书这里需要写`*.域名`的形式)；
+3. 等待自动配置部分内容后，选择 VPS 类型（OpenVZ 还是 Xen、KVM），并输入服务器 IPv4 地址或域名。使用泛域名证书时应输入实际连接的具体域名，而不是 `*.域名`；
 
 4. 选择使用使用证书颁发机构签发的SSL证书还是生成自签名证书：
 
@@ -53,9 +56,9 @@
 
 5. 是否使用SNAT规则(可选).默认为不使用.使用前请确保服务器具有不变的**静态公网ip**,可提升防火墙对数据包的处理速度.如果服务器网络设置了NAT(如AWS的弹性ip机制),则填写网卡连接接口的ip地址(参见[KinonC](https://github.com/KinonC)提供的方案:[#36](https://github.com/quericy/one-key-ikev2-vpn/issues/36)).
 
-6. 防火墙配置.默认配置iptables(如果使用的是firewall(如CentOS7)请选择yes自动配置firewall,将无视SNAT并跳过后续的补充网卡接口步骤).补充网卡接口信息,为空则使用默认值(Xen、KVM默认使用eth0,OpenVZ默认使用venet0).如果服务器使用其他公网接口需要在此指定接口名称,**填写错误VPN连接后将无法访问外网**)
+6. 防火墙配置：默认使用 iptables，也可选择 firewalld。iptables 模式默认检测 IPv4 默认路由的网卡，检测失败时使用 eth0 或 venet0；请确认网卡名称正确。脚本会保存当前完整 iptables 规则到 `/etc/iptables.rules`，并在 systemd 系统中启用规则恢复服务。请确认不会与已有防火墙管理工具冲突。
 
-7. 看到install Complete字样即表示安装完成。默认用户名密码将以黄字显示，可根据提示自行修改配置文件中的用户名密码,多用户则在配置文件中按格式一行一个(多用户时用户名不能使用%any),保存并重启服务生效。
+7. 看到 install Complete 表示安装完成。随机生成的 IKEv2 密码、IKEv1 XAUTH 密码和 PSK 会显示在终端，并保存在 `/usr/local/etc/ipsec.secrets` 中；用户名默认为 `myUserName`。多用户可按格式添加 EAP 条目，保存并重启服务生效。
 
 8. 将提示信息中的证书文件ca.cert.pem拷贝到客户端，修改后缀名为.cer后导入。ios设备使用Ikev1无需导入证书，而是需要在连接时输入共享密钥，共享密钥即是提示信息中的黄字PSK.
 
@@ -83,14 +86,15 @@
 
 卸载方式
 ===
-1. 进入脚本所在目录的strongswan文件夹执行:
+1. 在 systemd 系统中先停止并禁用服务，再进入脚本所在目录的 strongSwan 源码目录执行卸载：
     ```bash
+    systemctl disable --now strongswan-starter.service
     make uninstall
     ```
 
 2. 删除脚本所在目录的相关文件(one-key-ikev2.sh,strongswan.tar.gz,strongswan文件夹,my_key文件夹).
 
-3. 卸载后记得检查iptables配置.
+3. 检查并清理 iptables/firewalld 规则。若使用脚本创建的 iptables 持久化服务，还需禁用 `ikev2-iptables.service`，并按需删除 `/etc/iptables.rules` 和 `/etc/systemd/system/ikev2-iptables.service`。按需删除 `/etc/sysctl.d/10-ipsec.conf` 后重新加载 sysctl。
 
 分支说明
 ==========
@@ -100,9 +104,10 @@
 
 部分问题解决方案
 ======
-* ipsec启动问题：服务器重启后默认ipsec不会自启动，请命令手动开启,或添加/usr/local/sbin/ipsec start到自启动脚本文件中(如rc.local等)：
+* 在 systemd 系统上检查或重启服务：
     ```bash
-    ipsec start
+    systemctl status strongswan-starter.service
+    systemctl restart strongswan-starter.service
     ```
 
 * ipsec常用指令:
@@ -130,7 +135,7 @@
 
 * 部分vps可能会出现无法连接到`https://download.strongswan.org`的情况，此时可以本地下载strongswan文件，然后利用`scp`等工具上传至vps相应目录:
     ```bash
-    wget --no-check-certificate https://download.strongswan.org/strongswan-5.5.1.tar.gz
+    curl -fLO https://download.strongswan.org/strongswan-6.1.0.tar.gz
     
     scp -P your-vps-port /path/to/file account@your-vps-ip:~
     ```
